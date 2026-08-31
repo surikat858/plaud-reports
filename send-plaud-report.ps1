@@ -9,7 +9,7 @@ $from = "sender@example.com"
 $recipients = @("recipient1@example.com", "recipient2@example.com")
 
 # ============================================================
-# 1. НАСТРОЙКА ЛОГИРОВАНИЯ (без консольного вывода)
+# 1. НАСТРОЙКА ЛОГИРОВАНИЯ
 # ============================================================
 $outputFolder = "$env:USERPROFILE\Documents\PlaudReports"
 $logDate = Get-Date -Format 'yyyy-MM-dd'
@@ -19,32 +19,53 @@ function Write-Log {
     param($Message, $Level = "INFO")
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $logEntry = "[$timestamp] [$Level] $Message"
-    # Только запись в файл (консоль не используется)
+    
+    # Вывод в консоль (цветной)
+    if ($Level -eq "ERROR") {
+        Write-Host $logEntry -ForegroundColor Red
+    } elseif ($Level -eq "WARNING") {
+        Write-Host $logEntry -ForegroundColor Yellow
+    } elseif ($Level -eq "SUCCESS") {
+        Write-Host $logEntry -ForegroundColor Green
+    } else {
+        Write-Host $logEntry -ForegroundColor Gray
+    }
+    
+    # Запись в файл
     try { Add-Content -Path $logFile -Value $logEntry -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
 }
 
 if (-not (Test-Path $outputFolder)) {
     New-Item -ItemType Directory -Path $outputFolder -Force | Out-Null
+    Write-Log "Создана папка: $outputFolder" "INFO"
 }
 
 # ============================================================
 # 2. РОТАЦИЯ СТАРЫХ ФАЙЛОВ (14 дней)
 # ============================================================
 $cutoffDate = (Get-Date).AddDays(-14)
+Write-Log "Проверка старых файлов..." "INFO"
+
 $oldLogs = Get-ChildItem -Path $outputFolder -Filter "plaud_log_*.txt" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoffDate }
-foreach ($log in $oldLogs) { Remove-Item -Path $log.FullName -Force -ErrorAction SilentlyContinue }
+foreach ($log in $oldLogs) {
+    Remove-Item -Path $log.FullName -Force -ErrorAction SilentlyContinue
+    Write-Log "  Удалён старый лог: $($log.Name)" "INFO"
+}
 
 $oldFiles = Get-ChildItem -Path $outputFolder -File -ErrorAction SilentlyContinue | Where-Object {
     $_.LastWriteTime -lt $cutoffDate -and $_.Name -notlike "plaud_log_*" -and $_.Name -ne "plaud_sent.log"
 }
-foreach ($file in $oldFiles) { Remove-Item -Path $file.FullName -Force -ErrorAction SilentlyContinue }
+foreach ($file in $oldFiles) {
+    Remove-Item -Path $file.FullName -Force -ErrorAction SilentlyContinue
+    Write-Log "  Удалён старый отчёт: $($file.Name)" "INFO"
+}
 
 Write-Log "==================================================" "INFO"
-Write-Log "ЗАПУСК СКРИПТА (планировщик)" "INFO"
+Write-Log "ЗАПУСК СКРИПТА" "INFO"
 Write-Log "==================================================" "INFO"
 
 # ============================================================
-# 3. ФУНКЦИЯ ПОЛУЧЕНИЯ ДАННЫХ
+# 3. ФУНКЦИЯ ПОЛУЧЕНИЯ ДАННЫХ ИЗ PLAUD CLI
 # ============================================================
 function Get-PlaudData {
     param($Command, $Arguments)
@@ -74,6 +95,8 @@ $recordings = Get-PlaudData -Command "today" -Arguments ""
 if ([string]::IsNullOrWhiteSpace($recordings)) {
     Write-Log "Нет новых записей" "WARNING"
     Write-Log "==================================================" "INFO"
+    Write-Host "`nНажмите Enter для выхода..."
+    Read-Host
     exit
 }
 
@@ -82,12 +105,14 @@ $idMatches = [regex]::Matches($recordings, $regex)
 if ($idMatches.Count -eq 0) {
     Write-Log "Нет новых записей" "WARNING"
     Write-Log "==================================================" "INFO"
+    Write-Host "`nНажмите Enter для выхода..."
+    Read-Host
     exit
 }
 
 if (-not (Test-Path $sentLogFile)) {
     New-Item -ItemType File -Path $sentLogFile -Force | Out-Null
-    Write-Log "Создан файл лога отправленных ID" "INFO"
+    Write-Log "Создан файл лога отправленных ID: $sentLogFile" "INFO"
 }
 
 $sentIds = Get-Content $sentLogFile
@@ -100,10 +125,12 @@ foreach ($match in $idMatches) {
 if ($newIds.Count -eq 0) {
     Write-Log "Все записи уже обработаны" "INFO"
     Write-Log "==================================================" "INFO"
+    Write-Host "`nНажмите Enter для выхода..."
+    Read-Host
     exit
 }
 
-Write-Log "Найдено новых записей: $($newIds.Count)" "INFO"
+Write-Log "Найдено новых записей: $($newIds.Count)" "SUCCESS"
 
 $processedCount = 0
 $errorCount = 0
@@ -178,7 +205,9 @@ $tasks
     try {
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
         $smtp = New-Object System.Net.Mail.SmtpClient($smtpServer, $smtpPort)
-        $smtp.EnableSsl = $false
+        # STARTTLS: нужно для порта 587 у Gmail/Yandex/Mail.ru/Outlook
+        # (см. таблицу SMTP в README). Если ваш релей не требует SSL/TLS - поставьте $false.
+        $smtp.EnableSsl = $true
         $smtp.DeliveryMethod = [System.Net.Mail.SmtpDeliveryMethod]::Network
         $smtp.UseDefaultCredentials = $false
         $smtp.Credentials = New-Object System.Net.NetworkCredential($username, $password)
@@ -227,7 +256,27 @@ ID записи: $recordingId
     }
 }
 
+# ============================================================
+# 5. ИТОГИ
+# ============================================================
 Write-Log "==================================================" "INFO"
 Write-Log "ГОТОВО!" "SUCCESS"
 Write-Log "Обработано: $processedCount, Ошибок: $errorCount" "INFO"
 Write-Log "==================================================" "INFO"
+
+Write-Host ""
+Write-Host "==================================================" -ForegroundColor Cyan
+Write-Host "  📊 ИТОГИ" -ForegroundColor White
+Write-Host "==================================================" -ForegroundColor Cyan
+Write-Host "✅ Обработано: $processedCount" -ForegroundColor Green
+if ($errorCount -gt 0) {
+    Write-Host "❌ Ошибок: $errorCount" -ForegroundColor Red
+} else {
+    Write-Host "✅ Ошибок: $errorCount" -ForegroundColor Green
+}
+Write-Host ""
+Write-Host "📁 Лог сохранён в: $logFile" -ForegroundColor Gray
+Write-Host "==================================================" -ForegroundColor Cyan
+
+Write-Host "`nНажмите Enter для выхода..."
+Read-Host
